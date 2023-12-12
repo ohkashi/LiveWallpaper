@@ -3,6 +3,13 @@
 #include <mferror.h>
 
 
+// Private window message to notify the application of playback events.
+static const UINT WM_APP_NOTIFY = WM_APP + 1;   // wparam = MFP_MEDIAPLAYER_STATE
+
+// Private window message to notify the application when an error occurs.
+static const UINT WM_APP_ERROR = WM_APP + 2;    // wparam = HRESULT
+
+
 //-------------------------------------------------------------------
 //
 // MediaPlayerCallback class
@@ -11,56 +18,21 @@
 //
 //-------------------------------------------------------------------
 
-#include <Shlwapi.h>
-
-class MFPVideoPlayer;
-
-class MediaPlayerCallback : public IMFPMediaPlayerCallback
+class MFPVideoPlayer : public IMFPMediaPlayerCallback
 {
-	long m_cRef; // Reference count
-	MFPVideoPlayer* m_pPlayer;
-
 public:
-	MediaPlayerCallback(MFPVideoPlayer* pPlayer) : m_cRef(1), m_pPlayer(pPlayer)
-	{
-	}
+	static HRESULT CreateInstance(HWND hwndEvent, HWND hwndVideo, MFPVideoPlayer** ppPlayer);
 
-	STDMETHODIMP QueryInterface(REFIID riid, void** ppv)
-	{
-		static const QITAB qit[] = 
-		{
-			QITABENT(MediaPlayerCallback, IMFPMediaPlayerCallback),
-			{ 0 },
-		};
-		return QISearch(this, qit, riid, ppv);
-	}
-	STDMETHODIMP_(ULONG) AddRef() 
-	{
-		return InterlockedIncrement(&m_cRef); 
-	}
-	STDMETHODIMP_(ULONG) Release()
-	{
-		ULONG count = InterlockedDecrement(&m_cRef);
-		if (count == 0)
-		{
-			delete this;
-			return 0;
-		}
-		return count;
-	}
+	// IUnknown methods
+	STDMETHODIMP QueryInterface(REFIID iid, void** ppv);
+	STDMETHODIMP_(ULONG) AddRef();
+	STDMETHODIMP_(ULONG) Release();
 
 	// IMFPMediaPlayerCallback methods
 	void STDMETHODCALLTYPE OnMediaPlayerEvent(MFP_EVENT_HEADER* pEventHeader);
-};
 
-
-class MFPVideoPlayer
-{
-public:
-	MFPVideoPlayer();
-	~MFPVideoPlayer();
-
-	HRESULT PlayMediaFile(HWND hwnd, const WCHAR* sURL);
+	HRESULT OpenURL(const WCHAR* sURL);
+	HRESULT Shutdown();
 	MFP_MEDIAPLAYER_STATE GetState() noexcept;
 	bool Play() noexcept;
 	bool Pause() noexcept;
@@ -69,22 +41,44 @@ public:
 	bool SetVolume(float fVolume) noexcept;
 	bool GetMute() noexcept;
 	bool SetMute(bool bMute) noexcept;
+
+	// Seeking
+	HRESULT GetDuration(MFTIME *phnsDuration);
+	HRESULT CanSeek(BOOL *pbCanSeek);
+	HRESULT GetCurrentPosition(MFTIME *phnsPosition);
+	HRESULT SetPosition(MFTIME hnsPosition);
+
 	inline void UpdateVideo() {
 		if (m_pPlayer && m_bHasVideo)
 			m_pPlayer->UpdateVideo();
 	}
 
 protected:
+	MFPVideoPlayer(HWND hwndEvent);
+	virtual ~MFPVideoPlayer();
+
+	HRESULT Initialize(HWND hwndVideo);
+
+	// NotifyState: Notifies the application when the state changes.
+	void NotifyState(MFP_MEDIAPLAYER_STATE state)
+	{
+		PostMessage(m_hwndEvent, WM_APP_NOTIFY, (WPARAM)state, (LPARAM)0);
+	}
+
+	// NotifyError: Notifies the application when an error occurs.
+	void NotifyError(HRESULT hr)
+	{
+		PostMessage(m_hwndEvent, WM_APP_ERROR, (WPARAM)hr, 0);
+	}
+
 	// MFPlay event handler functions.
 	void OnMediaItemCreated(MFP_MEDIAITEM_CREATED_EVENT* pEvent);
 	void OnMediaItemSet(MFP_MEDIAITEM_SET_EVENT* pEvent);
-	void OnPlaybackEnded(MFP_MEDIAITEM_SET_EVENT* pEvent);
-	void ShowErrorMessage(PCWSTR format, HRESULT hrErr);
 
 private:
+	long					m_cRef;			// Reference count
 	IMFPMediaPlayer*		m_pPlayer;		// The MFPlay player object.
-	MediaPlayerCallback*	m_pPlayerCB;	// Application callback object.
+	HWND					m_hwndEvent;	// App window to receive events.
 	bool					m_bHasVideo;
-
-	friend class MediaPlayerCallback;
+	MFP_MEDIAITEM_CHARACTERISTICS	m_caps;
 };

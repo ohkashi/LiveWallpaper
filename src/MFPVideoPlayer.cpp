@@ -1,10 +1,121 @@
 #include "pch.h"
-#include "MFPVideoPlayer.h"
-#include <strsafe.h>
+#include "LiveWallpaper.h"
+#include <Shlwapi.h>
 #include <new>
 
 #pragma comment(lib, "mfplay.lib")
 #pragma comment(lib, "shlwapi.lib")
+
+
+//-----------------------------------------------------------------------------
+// CreateInstance
+//
+// Creates an instance of the MFPlayer2 object.
+//-----------------------------------------------------------------------------
+
+HRESULT MFPVideoPlayer::CreateInstance(HWND hwndEvent, HWND hwndVideo, MFPVideoPlayer** ppPlayer)
+{
+	HRESULT hr = S_OK;
+
+	MFPVideoPlayer* pPlayer = new (std::nothrow)MFPVideoPlayer(hwndEvent);
+	if (!pPlayer)
+		return E_OUTOFMEMORY;
+
+	hr = pPlayer->Initialize(hwndVideo);
+	if (SUCCEEDED(hr)) {
+		*ppPlayer = pPlayer;
+		(*ppPlayer)->AddRef();
+	}
+
+	SafeRelease(&pPlayer);
+	return hr;
+}
+
+//-----------------------------------------------------------------------------
+// Constructor
+//-----------------------------------------------------------------------------
+
+MFPVideoPlayer::MFPVideoPlayer(HWND hwndEvent) : m_cRef(1), m_pPlayer(nullptr),
+m_hwndEvent(hwndEvent), m_bHasVideo(false), m_caps(0)
+{
+}
+
+//-----------------------------------------------------------------------------
+// Destructor
+//-----------------------------------------------------------------------------
+
+MFPVideoPlayer::~MFPVideoPlayer()
+{
+	SafeRelease(&m_pPlayer);
+}
+
+//------------------------------------------------------------------------------
+//  Initialize
+//  Creates an instance of the MFPlay player object.
+//
+//  hwndVideo: 
+//  Handle to the video window.
+//------------------------------------------------------------------------------
+
+HRESULT MFPVideoPlayer::Initialize(HWND hwndVideo)
+{
+	HRESULT hr = S_OK;
+
+	SafeRelease(&m_pPlayer);
+
+	hr = MFPCreateMediaPlayer(
+		NULL,
+		FALSE,          // Start playback automatically?
+		0,              // Flags
+		this,           // Callback pointer   
+		hwndVideo,      // Video window
+		&m_pPlayer
+	);
+
+	return hr;
+}
+
+
+//***************************** IUnknown methods *****************************//
+
+//------------------------------------------------------------------------------
+//  AddRef
+//------------------------------------------------------------------------------
+
+ULONG MFPVideoPlayer::AddRef()
+{
+	return InterlockedIncrement(&m_cRef);
+}
+
+//------------------------------------------------------------------------------
+//  Release
+//------------------------------------------------------------------------------
+
+ULONG MFPVideoPlayer::Release()
+{
+	ULONG uCount = InterlockedDecrement(&m_cRef);
+	if (uCount == 0)
+	{
+		delete this;
+	}
+	return uCount;
+}
+
+//------------------------------------------------------------------------------
+//  QueryInterface
+//------------------------------------------------------------------------------
+
+STDMETHODIMP MFPVideoPlayer::QueryInterface(REFIID riid, void** ppv)
+{
+	static const QITAB qit[] = 
+	{
+		QITABENT(MFPVideoPlayer, IMFPMediaPlayerCallback),
+		{ 0 },
+	};
+	return QISearch(this, qit, riid, ppv);
+}
+
+//********************* IMFPMediaPlayerCallback methods **********************//
 
 
 //-------------------------------------------------------------------
@@ -14,89 +125,80 @@
 // This callback method handles events from the MFPlay object.
 //-------------------------------------------------------------------
 
-void MediaPlayerCallback::OnMediaPlayerEvent(MFP_EVENT_HEADER * pEventHeader)
+void MFPVideoPlayer::OnMediaPlayerEvent(MFP_EVENT_HEADER* pEventHeader)
 {
 	if (FAILED(pEventHeader->hrEvent)) {
-		m_pPlayer->ShowErrorMessage(L"Playback error", pEventHeader->hrEvent);
+		NotifyError(pEventHeader->hrEvent);
 		return;
 	}
 
 	switch (pEventHeader->eEventType) {
 	case MFP_EVENT_TYPE_MEDIAITEM_CREATED:
-		m_pPlayer->OnMediaItemCreated(MFP_GET_MEDIAITEM_CREATED_EVENT(pEventHeader));
+		OnMediaItemCreated(MFP_GET_MEDIAITEM_CREATED_EVENT(pEventHeader));
 		break;
 
 	case MFP_EVENT_TYPE_MEDIAITEM_SET:
-		m_pPlayer->OnMediaItemSet(MFP_GET_MEDIAITEM_SET_EVENT(pEventHeader));
+		OnMediaItemSet(MFP_GET_MEDIAITEM_SET_EVENT(pEventHeader));
+		break;
+
+	case MFP_EVENT_TYPE_RATE_SET:
 		break;
 
 	case MFP_EVENT_TYPE_PLAYBACK_ENDED:
-		m_pPlayer->OnPlaybackEnded(MFP_GET_MEDIAITEM_SET_EVENT(pEventHeader));
+		SetPosition(0);
+		__fallthrough;
+	case MFP_EVENT_TYPE_STOP:
+		{
+			/*HWND hwndVideo = NULL;
+			if (SUCCEEDED(m_pPlayer->GetVideoWindow(&hwndVideo)))
+				InvalidateRect(hwndVideo, NULL, FALSE);*/
+		}
 		break;
 	}
-}
 
-
-//-------------------------------------------------------------------
-// MFPVideoPlayer class
-// 
-//-------------------------------------------------------------------
-
-MFPVideoPlayer::MFPVideoPlayer() : m_pPlayer(nullptr), m_pPlayerCB(nullptr), m_bHasVideo(false)
-{
-}
-
-MFPVideoPlayer::~MFPVideoPlayer()
-{
-	if (m_pPlayer) {
-		m_pPlayer->Shutdown();
-		m_pPlayer->Release();
-		m_pPlayer = nullptr;
-	}
-	if (m_pPlayerCB) {
-		m_pPlayerCB->Release();
-		m_pPlayerCB = nullptr;
-	}
+	NotifyState(pEventHeader->eState);
 }
 
 //-------------------------------------------------------------------
-// PlayMediaFile
+// OpenURL
 //
-// Plays a media file, using the IMFPMediaPlayer interface.
+// Open a media file by URL.
 //-------------------------------------------------------------------
 
-HRESULT MFPVideoPlayer::PlayMediaFile(HWND hwnd, const WCHAR* sURL)
+HRESULT MFPVideoPlayer::OpenURL(const WCHAR* sURL)
 {
 	HRESULT hr = S_OK;
 
-	// Create the MFPlayer object.
-	while (1) {
-		if (!m_pPlayer) {
-			m_pPlayerCB = new (std::nothrow) MediaPlayerCallback(this);
-			if (!m_pPlayerCB) {
-				hr = E_OUTOFMEMORY;
-				break;
-			}
-
-			hr = MFPCreateMediaPlayer(
-				NULL,
-				FALSE,          // Start playback automatically?
-				0,              // Flags
-				m_pPlayerCB,    // Callback pointer
-				hwnd,           // Video window
-				&m_pPlayer
-			);
-			if (FAILED(hr))
-				break;
-		}
-
-		// Create a new media item for this URL.
-		hr = m_pPlayer->CreateMediaItemFromURL(sURL, FALSE, 0, NULL);
-		return hr;
+	if (sURL == NULL)
+	{
+		return E_POINTER;
 	}
-	// The CreateMediaItemFromURL method completes asynchronously. 
-	// The application will receive an MFP_EVENT_TYPE_MEDIAITEM_CREATED 
-	// event. See MediaPlayerCallback::OnMediaPlayerEvent().
+
+	if (m_pPlayer == NULL)
+	{
+		return E_UNEXPECTED;
+	}
+
+	// Create a new media item for this URL.
+	hr = m_pPlayer->CreateMediaItemFromURL(sURL, FALSE, 0, NULL);
+
+	// The CreateMediaItemFromURL method completes asynchronously. When it does,
+	// MFPlay sends an MFP_EVENT_TYPE_MEDIAITEM_CREATED event.
+
+	return hr;
+}
+
+//-----------------------------------------------------------------------------
+// Shutdown
+//
+// Shutdown the MFPlay object.
+//-----------------------------------------------------------------------------
+
+HRESULT MFPVideoPlayer::Shutdown()
+{
+	HRESULT hr = S_OK;
+	if (m_pPlayer)
+		hr = m_pPlayer->Shutdown();
 	return hr;
 }
 
@@ -172,6 +274,86 @@ bool MFPVideoPlayer::SetMute(bool bMute) noexcept
 	return false;
 }
 
+//-----------------------------------------------------------------------------
+// CanSeek
+//
+// Queries whether the current media file is seekable.
+//-----------------------------------------------------------------------------
+
+HRESULT MFPVideoPlayer::CanSeek(BOOL *pbCanSeek)
+{
+	*pbCanSeek = ((m_caps & MFP_MEDIAITEM_CAN_SEEK) && !(m_caps  & MFP_MEDIAITEM_HAS_SLOW_SEEK));
+	return S_OK;
+}
+
+//-----------------------------------------------------------------------------
+// GetDuration
+//
+// Gets the playback duration.
+//-----------------------------------------------------------------------------
+
+HRESULT MFPVideoPlayer::GetDuration(MFTIME *phnsDuration)
+{
+	HRESULT hr = E_FAIL;
+
+	PROPVARIANT var;
+	PropVariantInit(&var);
+	if (m_pPlayer) {
+		hr = m_pPlayer->GetDuration(MFP_POSITIONTYPE_100NS, &var);
+		if (SUCCEEDED(hr)) {
+			*phnsDuration = var.uhVal.QuadPart;
+		}
+	}
+
+	PropVariantClear(&var);
+	return hr;
+}
+
+//-----------------------------------------------------------------------------
+// GetCurrentPosition
+// 
+// Gets the current playback position.
+//-----------------------------------------------------------------------------
+
+HRESULT MFPVideoPlayer::GetCurrentPosition(MFTIME *phnsPosition)
+{
+	HRESULT hr = E_FAIL;
+
+	PROPVARIANT var;
+	PropVariantInit(&var);
+	if (m_pPlayer) {
+		hr = m_pPlayer->GetPosition(MFP_POSITIONTYPE_100NS, &var);
+		if (SUCCEEDED(hr)) {
+			*phnsPosition = var.hVal.QuadPart;
+		}
+	}
+
+	PropVariantClear(&var);
+	return hr;
+}
+
+//-----------------------------------------------------------------------------
+// SetPosition
+//
+// Sets the current playback position.
+//-----------------------------------------------------------------------------
+
+HRESULT MFPVideoPlayer::SetPosition(MFTIME hnsPosition)
+{
+	HRESULT hr = E_FAIL;
+
+	PROPVARIANT var;
+	PropVariantInit(&var);
+	if (m_pPlayer) {
+		var.vt = VT_I8;
+		var.hVal.QuadPart = hnsPosition;
+		hr = m_pPlayer->SetPosition(MFP_POSITIONTYPE_100NS, &var);
+	}
+
+	PropVariantClear(&var);
+	return hr;
+}
+
 //-------------------------------------------------------------------
 // OnMediaItemCreated
 //
@@ -200,7 +382,8 @@ void MFPVideoPlayer::OnMediaItemCreated(MFP_MEDIAITEM_CREATED_EVENT* pEvent)
 		}
 	}
 	if (FAILED(hr)) {
-		ShowErrorMessage(L"Error playing this file.", hr);
+		NotifyError(hr);
+		//ShowErrorMessage(L"Error playing this file.", hr);
 	}
 }
 
@@ -210,29 +393,29 @@ void MFPVideoPlayer::OnMediaItemCreated(MFP_MEDIAITEM_CREATED_EVENT* pEvent)
 // Called when the IMFPMediaPlayer::SetMediaItem method completes.
 //-------------------------------------------------------------------
 
-void MFPVideoPlayer::OnMediaItemSet(MFP_MEDIAITEM_SET_EVENT* /*pEvent*/) 
+void MFPVideoPlayer::OnMediaItemSet(MFP_MEDIAITEM_SET_EVENT* pEvent)
 {
-	HRESULT hr = m_pPlayer->Play();
-	if (FAILED(hr)) {
-		ShowErrorMessage(L"IMFPMediaPlayer::Play failed.", hr);
+	HRESULT hr = pEvent->header.hrEvent;
+	while (1) {
+		if (FAILED(hr))
+			break;
+
+		if (pEvent->pMediaItem) {
+			hr = pEvent->pMediaItem->GetCharacteristics(&m_caps);
+			if (FAILED(hr))
+				break;
+		}
+
+		hr = m_pPlayer->Play();
+		if (FAILED(hr)) {
+			NotifyError(hr);
+			//ShowErrorMessage(L"IMFPMediaPlayer::Play failed.", hr);
+			break;
+		}
+		m_pPlayer->SetMute(TRUE);
 		return;
 	}
-	m_pPlayer->SetMute(TRUE);
-}
-
-void MFPVideoPlayer::OnPlaybackEnded(MFP_MEDIAITEM_SET_EVENT* pEvent)
-{
-	HRESULT hr = m_pPlayer->Play();
 	if (FAILED(hr)) {
-		ShowErrorMessage(L"IMFPMediaPlayer::Play failed.", hr);
-	}
-}
-
-void MFPVideoPlayer::ShowErrorMessage(PCWSTR format, HRESULT hrErr)
-{
-	WCHAR msg[MAX_PATH];
-	HRESULT hr = StringCbPrintf(msg, sizeof(msg), L"%s (hr=0x%X)", format, hrErr);
-	if (SUCCEEDED(hr)) {
-		MessageBox(NULL, msg, L"Error", MB_ICONERROR);
+		//NotifyError(hr);
 	}
 }

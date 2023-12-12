@@ -5,21 +5,29 @@
 #include "framework.h"
 #include "LiveWallpaper.h"
 #include "MFPVideoPlayer.h"
+#include <strsafe.h>
 
 
 #define MAX_LOADSTRING 100
 
+const MFTIME	ONE_SECOND = 10000000;	// One second in hns
+const MFTIME	ONE_MSEC = 1000;		// One msec in hns
+
 // Global Variables:
-HINSTANCE hInst;                                // current instance
-WCHAR szTitle[MAX_LOADSTRING];                  // The title bar text
-WCHAR szWindowClass[MAX_LOADSTRING];            // the main window class name
+HINSTANCE hInst;						// current instance
+WCHAR szTitle[MAX_LOADSTRING];			// The title bar text
+WCHAR szWindowClass[MAX_LOADSTRING];	// the main window class name
 MFPVideoPlayer* g_pPlayer = nullptr;
+MFTIME g_duration = 0;
 
 // Forward declarations of functions included in this code module:
 ATOM MyRegisterClass(HINSTANCE hInstance);
 HWND InitWindow(HWND hParent, int nCmdShow, int width, int height);
 LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
 INT_PTR CALLBACK About(HWND, UINT, WPARAM, LPARAM);
+void OnTimer();
+void OnPlayerNotify(MFP_MEDIAPLAYER_STATE state);
+void ShowErrorMessage(HWND hWnd, LPCWSTR lpCaption, HRESULT hrErr);
 
 BOOL CALLBACK EnumWindowsProc(HWND hWnd, LPARAM lParam)
 {
@@ -102,12 +110,15 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     if (!hWnd)
         return 0;
 
-	g_pPlayer = new MFPVideoPlayer();
-	HRESULT hr = g_pPlayer->PlayMediaFile(hWnd, __targv[1]);
+	HRESULT hr = MFPVideoPlayer::CreateInstance(hWnd, hWnd, &g_pPlayer);
+	if (SUCCEEDED(hr))
+		hr = g_pPlayer->OpenURL(__targv[1]);
 	if (FAILED(hr)) {
 		RestoreWallPaper();
 		return 0;
 	}
+
+	SetTimer(hWnd, 1, 250, NULL);
 
 	// Message loop
 	HACCEL hAccelTable = LoadAccelerators(hInstance, MAKEINTRESOURCE(IDC_LIVE_WALLPAPER));
@@ -120,8 +131,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 		}
 	}
 
-	delete g_pPlayer;
-	g_pPlayer = nullptr;
+	if (g_pPlayer)
+		g_pPlayer->Shutdown();
+	SafeRelease(&g_pPlayer);
 
 	CoUninitialize();
     return (int)msg.wParam;
@@ -144,7 +156,7 @@ ATOM MyRegisterClass(HINSTANCE hInstance)
     wcex.hInstance      = hInstance;
     wcex.hIcon          = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_LIVE_WALLPAPER));
     wcex.hCursor        = LoadCursor(nullptr, IDC_ARROW);
-    wcex.hbrBackground  = (HBRUSH)(COLOR_WINDOW+1);
+    wcex.hbrBackground  = NULL;
     wcex.lpszMenuName   = MAKEINTRESOURCEW(IDC_LIVE_WALLPAPER);
     wcex.lpszClassName  = szWindowClass;
     wcex.hIconSm        = wcex.hIcon;
@@ -197,9 +209,11 @@ HWND InitWindow(HWND hParent, int nCmdShow, int width, int height)
 //
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
-    switch (message)
-    {
-    case WM_COMMAND:
+    switch (message) {
+	case WM_DESTROY:
+		PostQuitMessage(0);
+		break;
+	case WM_COMMAND:
         {
             int wmId = LOWORD(wParam);
             // Parse the menu selections:
@@ -216,7 +230,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             }
         }
         break;
-    case WM_PAINT:
+    /*case WM_PAINT:
         {
             PAINTSTRUCT ps;
             HDC hdc = BeginPaint(hWnd, &ps);
@@ -224,10 +238,21 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 				g_pPlayer->UpdateVideo();
             EndPaint(hWnd, &ps);
         }
-        break;
-    case WM_DESTROY:
-        PostQuitMessage(0);
-        break;
+        break;*/
+	case WM_ERASEBKGND:
+		return 0;
+	case WM_TIMER:
+		OnTimer();
+		break;
+
+	case WM_APP_NOTIFY:
+		OnPlayerNotify((MFP_MEDIAPLAYER_STATE)wParam);
+		break;
+	case WM_APP_ERROR:
+		ShowErrorMessage(hWnd, szTitle, (HRESULT)wParam);
+		PostMessage(hWnd, WM_CLOSE, 0, 0);
+		break;
+
     default:
         return DefWindowProc(hWnd, message, wParam, lParam);
     }
@@ -252,4 +277,43 @@ INT_PTR CALLBACK About(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
         break;
     }
     return (INT_PTR)FALSE;
+}
+
+void OnTimer()
+{
+	if (g_pPlayer && g_duration > 0) {
+		MFTIME timeNow;
+		if (SUCCEEDED(g_pPlayer->GetCurrentPosition(&timeNow))) {
+			if (timeNow + ONE_MSEC > g_duration)
+				g_pPlayer->SetPosition(0);
+		}
+	}
+}
+
+void OnPlayerNotify(MFP_MEDIAPLAYER_STATE state)
+{
+	switch (state) {
+	case MFP_MEDIAPLAYER_STATE_STOPPED:
+		g_pPlayer->Play();
+		break;
+	case MFP_MEDIAPLAYER_STATE_PLAYING:
+		if (!g_duration)
+			g_pPlayer->GetDuration(&g_duration);
+		break;
+	}
+}
+
+void ShowErrorMessage(HWND hWnd, LPCWSTR lpCaption, HRESULT hrErr)
+{
+	WCHAR msg[300];
+	LPWSTR lpMessage;
+	DWORD dwLen = FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM,
+		NULL, (DWORD)hrErr, NULL, (LPWSTR)&lpMessage, NULL, NULL);
+	if (dwLen > 0)
+		StringCbPrintf(msg, sizeof(msg), L"%s (hr=0x%X)", lpMessage, hrErr);
+	else
+		StringCbPrintf(msg, sizeof(msg), L"Playback error! (hr=0x%X)", hrErr);
+	LocalFree(lpMessage);
+
+	MessageBoxW(hWnd, msg, lpCaption, MB_ICONSTOP | MB_OK);
 }
