@@ -35,8 +35,33 @@ BOOL CALLBACK EnumWindowsProc(HWND hWnd, LPARAM lParam)
 	if (hwnd) {
 		HWND* ret = (HWND*)lParam;
 		*ret = FindWindowEx(NULL, hWnd, L"WorkerW", NULL);
+		return FALSE;
 	}
 	return TRUE;
+}
+
+BOOL CALLBACK EnumChildWndProc(HWND hWnd, LPARAM lParam)
+{
+	TCHAR szClassName[100] = { 0 };
+	if (!GetClassNameW(hWnd, szClassName, 100))
+		return TRUE;
+	if (_tcscmp(szClassName, _T("WorkerW")) == 0) {
+		HWND* ret = (HWND*)lParam;
+		*ret = hWnd;
+		return FALSE;
+	}
+	return TRUE;
+}
+
+HWND FindWorkerWnd(HWND hProgman)
+{
+	if (!hProgman)
+		hProgman = FindWindow(L"Progman", NULL);
+	HWND hWorker = NULL;
+	EnumChildWindows(hProgman, EnumChildWndProc, (LPARAM)&hWorker);
+	if (!hWorker)
+		EnumWindows(EnumWindowsProc, (LPARAM)&hWorker);
+	return hWorker;
 }
 
 void RestoreWallPaper()
@@ -67,8 +92,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     LoadStringW(hInstance, IDS_APP_TITLE, szTitle, MAX_LOADSTRING);
     LoadStringW(hInstance, IDC_LIVE_WALLPAPER, szWindowClass, MAX_LOADSTRING);
 
-	HWND hWorker = NULL;
-	EnumWindows(EnumWindowsProc, (LPARAM)&hWorker);
+	HWND hWorker = FindWorkerWnd(NULL);
 	if (hWorker) {
 		HWND hWnd = FindWindowEx(hWorker, NULL, szWindowClass, NULL);
 		if (hWnd) {
@@ -94,9 +118,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 	// We enumerate all Windows, until we find one, that has the SHELLDLL_DefView 
 	// as a child. 
 	// If we found that window, we take its next sibling and assign it to workerw.
-	hWorker = NULL;
-	EnumWindows(EnumWindowsProc, (LPARAM)&hWorker);
+	hWorker = FindWorkerWnd(progman);
 	if (!hWorker) {
+		printf("WorkerW not found!\n");
 		return 1;
 	}
 
